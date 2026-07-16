@@ -1,17 +1,14 @@
 """
 Registre Labo — Personnel & Équipements
-Application Streamlit simple, basée sur un fichier Excel comme "base de données".
-Lancer avec : streamlit run app.py
+Version connectée à Google Sheets, avec mot de passe.
 """
 import streamlit as st
 import pandas as pd
-from pathlib import Path
 from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Registre Labo", page_icon="🧪", layout="wide")
-
-DATA_FILE = Path("data/registre_labo.xlsx")
-DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 PERSONNEL_COLS = [
     "Nom complet", "Rôle", "Parcours scolaire", "Date de recrutement",
@@ -23,29 +20,67 @@ EQUIP_COLS = [
     "Fréquence étalonnage (jours)", "Dernier étalonnage", "Dernière maintenance",
 ]
 
-# ---------- Chargement / sauvegarde ----------
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+# ---------- Mot de passe ----------
+
+def check_password():
+    def password_entered():
+        if st.session_state["password"] == st.secrets["app_password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.title("🧪 Registre Labo")
+    st.text_input("Mot de passe", type="password", on_change=password_entered, key="password")
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+        st.error("Mot de passe incorrect.")
+    return False
+
+
+if not check_password():
+    st.stop()
+
+# ---------- Connexion Google Sheets ----------
+
+@st.cache_resource
+def get_client():
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
+def get_sheet():
+    return get_client().open(st.secrets["sheet_name"])
+
 
 def load_data():
-    if DATA_FILE.exists():
-        xls = pd.ExcelFile(DATA_FILE)
-        personnel = (
-            pd.read_excel(xls, "Personnel") if "Personnel" in xls.sheet_names
-            else pd.DataFrame(columns=PERSONNEL_COLS)
-        )
-        equip = (
-            pd.read_excel(xls, "Equipements") if "Equipements" in xls.sheet_names
-            else pd.DataFrame(columns=EQUIP_COLS)
-        )
-    else:
-        personnel = pd.DataFrame(columns=PERSONNEL_COLS)
-        equip = pd.DataFrame(columns=EQUIP_COLS)
+    sh = get_sheet()
+    personnel_ws = sh.worksheet("Personnel")
+    equip_ws = sh.worksheet("Equipements")
+    p_records = personnel_ws.get_all_records()
+    e_records = equip_ws.get_all_records()
+    personnel = pd.DataFrame(p_records) if p_records else pd.DataFrame(columns=PERSONNEL_COLS)
+    equip = pd.DataFrame(e_records) if e_records else pd.DataFrame(columns=EQUIP_COLS)
     return personnel, equip
 
 
-def save_data(personnel_df, equip_df):
-    with pd.ExcelWriter(DATA_FILE, engine="openpyxl") as writer:
-        personnel_df.to_excel(writer, sheet_name="Personnel", index=False)
-        equip_df.to_excel(writer, sheet_name="Equipements", index=False)
+def save_personnel(df):
+    ws = get_sheet().worksheet("Personnel")
+    ws.clear()
+    ws.update([df.columns.tolist()] + df.astype(str).values.tolist())
+
+
+def save_equip(df):
+    ws = get_sheet().worksheet("Equipements")
+    ws.clear()
+    ws.update([df.columns.tolist()] + df.astype(str).values.tolist())
 
 
 if "personnel" not in st.session_state or "equip" not in st.session_state:
@@ -86,6 +121,10 @@ def epi_status(row):
 # ---------- Navigation ----------
 
 st.sidebar.title("🧪 Registre Labo")
+if st.sidebar.button("🔓 Se déconnecter"):
+    st.session_state["password_correct"] = False
+    st.rerun()
+
 page = st.sidebar.radio("Navigation", ["Tableau de bord", "Personnel", "Équipements", "Importer un Excel"])
 
 # ---------- Tableau de bord ----------
@@ -120,7 +159,7 @@ if page == "Tableau de bord":
 
 elif page == "Personnel":
     st.title("Personnel")
-    st.caption("Modifie directement le tableau comme dans Excel. Ajoute une ligne en bas, coche pour supprimer.")
+    st.caption("Modifie directement le tableau comme dans Excel, puis clique sur Sauvegarder.")
     edited = st.data_editor(
         st.session_state.personnel,
         num_rows="dynamic",
@@ -134,8 +173,8 @@ elif page == "Personnel":
     )
     st.session_state.personnel = edited
     if st.button("💾 Sauvegarder Personnel", type="primary"):
-        save_data(st.session_state.personnel, st.session_state.equip)
-        st.success("Données sauvegardées dans data/registre_labo.xlsx")
+        save_personnel(st.session_state.personnel)
+        st.success("Données sauvegardées dans Google Sheets.")
 
 # ---------- Équipements ----------
 
@@ -156,16 +195,16 @@ elif page == "Équipements":
     )
     st.session_state.equip = edited
     if st.button("💾 Sauvegarder Équipements", type="primary"):
-        save_data(st.session_state.personnel, st.session_state.equip)
-        st.success("Données sauvegardées dans data/registre_labo.xlsx")
+        save_equip(st.session_state.equip)
+        st.success("Données sauvegardées dans Google Sheets.")
 
 # ---------- Import depuis l'Excel existant ----------
 
 elif page == "Importer un Excel":
     st.title("Importer un fichier Excel existant")
     st.caption(
-        "Charge le fichier que RQ t'a donné. Si les noms de colonnes correspondent à ceux "
-        "attendus ci-dessous, les lignes seront ajoutées automatiquement."
+        "Charge le fichier que RQ t'a donné. Si les noms de colonnes correspondent, "
+        "les lignes seront ajoutées automatiquement."
     )
     cible = st.radio("Ce fichier concerne :", ["Personnel", "Équipements"], horizontal=True)
     attendu = PERSONNEL_COLS if cible == "Personnel" else EQUIP_COLS
@@ -180,10 +219,7 @@ elif page == "Importer un Excel":
         colonnes_ok = [c for c in df_new.columns if c in attendu]
         colonnes_inconnues = [c for c in df_new.columns if c not in attendu]
         if colonnes_inconnues:
-            st.warning(
-                f"Colonnes non reconnues (ignorées) : {', '.join(colonnes_inconnues)}. "
-                "Renomme-les dans ton Excel pour qu'elles correspondent, puis réimporte."
-            )
+            st.warning(f"Colonnes non reconnues (ignorées) : {', '.join(colonnes_inconnues)}.")
 
         if st.button("Ajouter ces lignes"):
             df_clean = df_new[colonnes_ok]
@@ -191,12 +227,13 @@ elif page == "Importer un Excel":
                 st.session_state.personnel = pd.concat(
                     [st.session_state.personnel, df_clean], ignore_index=True
                 )
+                save_personnel(st.session_state.personnel)
             else:
                 st.session_state.equip = pd.concat(
                     [st.session_state.equip, df_clean], ignore_index=True
                 )
-            save_data(st.session_state.personnel, st.session_state.equip)
-            st.success(f"{len(df_clean)} ligne(s) ajoutée(s) et sauvegardée(s).")
+                save_equip(st.session_state.equip)
+            st.success(f"{len(df_clean)} ligne(s) ajoutée(s) et sauvegardée(s) dans Google Sheets.")
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Session ouverte : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
