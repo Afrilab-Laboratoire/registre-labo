@@ -203,37 +203,65 @@ elif page == "Équipements":
 elif page == "Importer un Excel":
     st.title("Importer un fichier Excel existant")
     st.caption(
-        "Charge le fichier que RQ t'a donné. Si les noms de colonnes correspondent, "
-        "les lignes seront ajoutées automatiquement."
+        "Charge le fichier que RQ t'a donné. Si le fichier a un en-tête de document "
+        "(titre, référence qualité...) au-dessus du vrai tableau, indique la ligne où "
+        "commencent les vrais titres de colonnes."
     )
     cible = st.radio("Ce fichier concerne :", ["Personnel", "Équipements"], horizontal=True)
     attendu = PERSONNEL_COLS if cible == "Personnel" else EQUIP_COLS
-    st.write("Colonnes attendues :", ", ".join(attendu))
+    st.write("Colonnes attendues par l'application :", ", ".join(attendu))
 
     uploaded = st.file_uploader("Fichier Excel (.xlsx)", type=["xlsx"])
     if uploaded is not None:
-        df_new = pd.read_excel(uploaded)
-        st.write("Aperçu du fichier importé :")
-        st.dataframe(df_new.head(), use_container_width=True)
+        header_row = st.number_input(
+            "Numéro de la ligne contenant les vrais titres de colonnes (1 = première ligne du fichier)",
+            min_value=1, max_value=30, value=1, step=1,
+        )
+        df_new = pd.read_excel(uploaded, header=header_row - 1)
+        df_new = df_new.dropna(axis=1, how="all")  # retire les colonnes totalement vides
+        df_new = df_new.dropna(how="all")  # retire les lignes totalement vides
+        df_new.columns = [str(c).strip() for c in df_new.columns]
 
-        colonnes_ok = [c for c in df_new.columns if c in attendu]
-        colonnes_inconnues = [c for c in df_new.columns if c not in attendu]
-        if colonnes_inconnues:
-            st.warning(f"Colonnes non reconnues (ignorées) : {', '.join(colonnes_inconnues)}.")
+        st.write("Aperçu avec cette ligne d'en-tête :")
+        st.dataframe(df_new.head(10), use_container_width=True)
+
+        st.subheader("Faire correspondre les colonnes")
+        st.caption(
+            "Pour chaque colonne de ton fichier, choisis à quelle colonne de l'application "
+            "elle correspond, ou laisse « Ignorer » si elle n'est pas utile."
+        )
+        options = ["-- Ignorer --"] + attendu
+        mapping = {}
+        for col in df_new.columns:
+            default_idx = options.index(col) if col in options else 0
+            choix = st.selectbox(f"« {col} » →", options, index=default_idx, key=f"map_{cible}_{col}")
+            if choix != "-- Ignorer --":
+                mapping[col] = choix
+
+        colonnes_manquantes = [c for c in attendu if c not in mapping.values()]
+        if colonnes_manquantes:
+            st.info(f"Colonnes de l'app non renseignées (resteront vides) : {', '.join(colonnes_manquantes)}")
 
         if st.button("Ajouter ces lignes"):
-            df_clean = df_new[colonnes_ok]
-            if cible == "Personnel":
-                st.session_state.personnel = pd.concat(
-                    [st.session_state.personnel, df_clean], ignore_index=True
-                )
-                save_personnel(st.session_state.personnel)
+            if not mapping:
+                st.error("Fais correspondre au moins une colonne avant d'ajouter.")
             else:
-                st.session_state.equip = pd.concat(
-                    [st.session_state.equip, df_clean], ignore_index=True
-                )
-                save_equip(st.session_state.equip)
-            st.success(f"{len(df_clean)} ligne(s) ajoutée(s) et sauvegardée(s) dans Google Sheets.")
+                df_clean = df_new[list(mapping.keys())].rename(columns=mapping)
+                for c in attendu:
+                    if c not in df_clean.columns:
+                        df_clean[c] = ""
+                df_clean = df_clean[attendu]
+                if cible == "Personnel":
+                    st.session_state.personnel = pd.concat(
+                        [st.session_state.personnel, df_clean], ignore_index=True
+                    )
+                    save_personnel(st.session_state.personnel)
+                else:
+                    st.session_state.equip = pd.concat(
+                        [st.session_state.equip, df_clean], ignore_index=True
+                    )
+                    save_equip(st.session_state.equip)
+                st.success(f"{len(df_clean)} ligne(s) ajoutée(s) et sauvegardée(s) dans Google Sheets.")
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Session ouverte : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
